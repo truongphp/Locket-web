@@ -77,6 +77,11 @@
     <main class="flex-1 flex flex-col items-center justify-center my-1">
       <div class="relative w-full aspect-square rounded-[36px] overflow-hidden bg-zinc-900 border border-zinc-800/80 shadow-2xl">
         <video id="cameraVideo" autoplay playsinline muted class="hidden w-full h-full object-cover"></video>
+        <video id="uploadedVideo" playsinline loop muted class="hidden w-full h-full object-cover"></video>
+        <div id="recBadge" class="hidden absolute top-3.5 right-3.5 z-20 px-3 py-1 rounded-full bg-red-600/90 text-white text-xs font-extrabold flex items-center gap-1.5 shadow-lg">
+          <span class="w-2 h-2 rounded-full bg-white animate-pulse"></span>
+          <span id="recTimerText">00:00 / 01:00</span>
+        </div>
         <canvas id="previewCanvas" width="720" height="720" class="w-full h-full object-cover block"></canvas>
 
         <!-- Empty Camera/Photo Prompt (khi chưa bật cam & chưa chọn ảnh & chưa bật hiệu ứng) -->
@@ -84,7 +89,7 @@
           <button id="btnQuickCam" class="px-5 py-2.5 rounded-full bg-amber-400 text-zinc-950 font-extrabold text-xs shadow-lg active:scale-95 transition">📷 Mở Camera ngay</button>
           <label class="px-4 py-2 rounded-full bg-zinc-800/90 border border-zinc-700 text-zinc-200 font-semibold text-xs cursor-pointer active:scale-95 transition">
             🖼️ Chọn ảnh từ thư viện
-            <input id="quickFileInput" type="file" accept="image/*" class="hidden" />
+            <input id="quickFileInput" type="file" accept="image/*,video/*" class="hidden" />
           </label>
         </div>
 
@@ -124,11 +129,16 @@
         <button data-sheet="led" class="tool-pill px-3 py-1.5 rounded-full bg-zinc-900 border border-zinc-800 text-xs font-semibold text-zinc-200 whitespace-nowrap active:scale-95 transition">🌈 LED</button>
       </div>
 
+      <!-- Capture Mode Toggle: Ảnh | Quay Video 60s -->
+      <div class="flex items-center justify-center gap-2 mb-2.5">
+        <button id="btnModePhoto" class="px-3.5 py-1 rounded-full bg-amber-400 text-zinc-950 text-[11px] font-extrabold transition">📷 Ảnh / Gửi</button>
+        <button id="btnModeVideo60" class="px-3.5 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-300 text-[11px] font-bold transition">🎥 Quay Video 60s</button>
+      </div>
       <!-- Primary Shutter / Send Row -->
       <div class="flex items-center justify-around px-3">
         <label class="w-12 h-12 rounded-2xl bg-zinc-900 border border-zinc-800 flex items-center justify-center text-xl cursor-pointer active:scale-95 transition" title="Chọn ảnh / video">
           🖼️
-          <input id="fileMediaInput" type="file" accept="image/*" class="hidden" />
+          <input id="fileMediaInput" type="file" accept="image/*,video/*" class="hidden" />
         </label>
 
         <button id="btnSendLocket" class="w-20 h-20 rounded-full bg-zinc-900 border-[4px] border-amber-400 flex items-center justify-center shadow-lg shadow-amber-500/20 active:scale-90 transition">
@@ -336,6 +346,14 @@
     selectedUids: new Set(),
     uploadedImage: null,
     cutoutImage: null,
+    uploadedVideoActive: false,
+    captureMode: "photo", // "photo" | "video60"
+    isRecording: false,
+    mediaRecorder: null,
+    recordedChunks: [],
+    recordedVideoBlob: null,
+    recSeconds: 0,
+    recInterval: null,
     cameraActive: false,
     facingMode: "user",
     cameraStream: null,
@@ -381,7 +399,7 @@
   }
 
   function updateEmptyPrompt() {
-    const hasVisual = state.cameraActive || state.uploadedImage || state.cloudEnabled || (state.boothEnabled && state.boothShots.length > 0);
+    const hasVisual = state.cameraActive || state.uploadedImage || state.uploadedVideoActive || state.cloudEnabled || (state.boothEnabled && state.boothShots.length > 0);
     $("emptyPrompt").classList.toggle("hidden", !!hasVisual);
   }
 
@@ -598,6 +616,8 @@
       drawPhotobooth(ctx);
     } else if (state.cameraActive && $("cameraVideo").readyState >= 2) {
       drawCoverImg(ctx, $("cameraVideo"), 0, 0, W, H);
+    } else if (state.uploadedVideoActive && $("uploadedVideo").readyState >= 2) {
+      drawCoverImg(ctx, $("uploadedVideo"), 0, 0, W, H);
     } else if (state.uploadedImage) {
       drawCoverImg(ctx, state.uploadedImage, 0, 0, W, H);
     } else {
@@ -761,11 +781,29 @@
     startCamera();
   };
 
-  // --- FILE UPLOAD ---
-  function handleImageUpload(file) {
+  // --- FILE UPLOAD (ẢNH + VIDEO) ---
+  function handleMediaUpload(file) {
     if (!file) return;
+    state.recordedVideoBlob = null;
+    if (file.type.startsWith("video/")) {
+      const uv = $("uploadedVideo");
+      uv.src = URL.createObjectURL(file);
+      uv.onloadeddata = () => {
+        uv.play().catch(() => {});
+        state.uploadedVideoActive = true;
+        state.uploadedImage = null;
+        state.cameraActive = false;
+        $("btnToggleCamera").textContent = "📷 Camera";
+        $("btnFlipCamera").classList.add("hidden");
+        updateEmptyPrompt();
+        showToast("Đã tải video lên khung Locket!");
+      };
+      return;
+    }
     const img = new Image();
     img.onload = () => {
+      $("uploadedVideo").pause();
+      state.uploadedVideoActive = false;
       state.uploadedImage = img;
       state.cutoutImage = null;
       state.cameraActive = false;
@@ -776,8 +814,8 @@
     };
     img.src = URL.createObjectURL(file);
   }
-  $("fileMediaInput").onchange = (e) => handleImageUpload(e.target.files?.[0]);
-  $("quickFileInput").onchange = (e) => handleImageUpload(e.target.files?.[0]);
+  $("fileMediaInput").onchange = (e) => handleMediaUpload(e.target.files?.[0]);
+  $("quickFileInput").onchange = (e) => handleMediaUpload(e.target.files?.[0]);
 
   // --- PHOTOBOOTH ---
   $("chkBoothEnable").onchange = (e) => { state.boothEnabled = e.target.checked; updateEmptyPrompt(); };
@@ -897,8 +935,79 @@
     } catch { showToast("Không tìm được nhạc lúc này!"); }
   };
 
+  function setCaptureMode(mode) {
+    state.captureMode = mode;
+    const isVid = mode === "video60";
+    $("btnModePhoto").className = isVid
+      ? "px-3.5 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-300 text-[11px] font-bold transition"
+      : "px-3.5 py-1 rounded-full bg-amber-400 text-zinc-950 text-[11px] font-extrabold transition";
+    $("btnModeVideo60").className = isVid
+      ? "px-3.5 py-1 rounded-full bg-red-500 text-white text-[11px] font-extrabold transition"
+      : "px-3.5 py-1 rounded-full bg-zinc-900 border border-zinc-800 text-zinc-300 text-[11px] font-bold transition";
+    const inner = $("btnSendLocket").querySelector("div");
+    if (!state.isRecording) {
+      inner.textContent = isVid ? "QUAY" : "GỬI";
+      inner.className = isVid
+        ? "w-16 h-16 rounded-full bg-gradient-to-br from-red-500 to-rose-600 flex items-center justify-center text-white font-extrabold text-xs"
+        : "w-16 h-16 rounded-full bg-gradient-to-br from-amber-300 to-amber-500 flex items-center justify-center text-zinc-950 font-extrabold text-xs";
+    }
+  }
+  $("btnModePhoto").onclick = () => setCaptureMode("photo");
+  $("btnModeVideo60").onclick = () => {
+    setCaptureMode("video60");
+    if (!state.cameraActive && !state.uploadedVideoActive) startCamera();
+  };
+
+  function toggleRecord60s() {
+    if (state.isRecording) {
+      if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") state.mediaRecorder.stop();
+      clearInterval(state.recInterval);
+      state.isRecording = false;
+      $("recBadge").classList.add("hidden");
+      setCaptureMode("photo");
+      showToast("🎬 Đã quay xong! Bấm GỬI để đăng lên Locket.");
+      return;
+    }
+    if (!canvas.captureStream) return showToast("Trình duyệt chưa hỗ trợ quay canvas!");
+    try {
+      const stream = canvas.captureStream(24);
+      const mime = MediaRecorder.isTypeSupported("video/mp4") ? "video/mp4" : "video/webm";
+      const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 750000 });
+      state.recordedChunks = [];
+      rec.ondataavailable = (e) => { if (e.data && e.data.size > 0) state.recordedChunks.push(e.data); };
+      rec.onstop = () => {
+        state.recordedVideoBlob = new Blob(state.recordedChunks, { type: mime });
+      };
+      rec.start(500);
+      state.mediaRecorder = rec;
+      state.isRecording = true;
+      state.recSeconds = 0;
+      $("recTimerText").textContent = "00:00 / 01:00";
+      $("recBadge").classList.remove("hidden");
+      const inner = $("btnSendLocket").querySelector("div");
+      inner.textContent = "DỪNG";
+      inner.className = "w-14 h-14 rounded-2xl bg-red-600 flex items-center justify-center text-white font-extrabold text-xs";
+      state.recInterval = setInterval(() => {
+        state.recSeconds += 1;
+        const mm = String(Math.floor(state.recSeconds / 60)).padStart(2, "0");
+        const ss = String(state.recSeconds % 60).padStart(2, "0");
+        $("recTimerText").textContent = `${mm}:${ss} / 01:00`;
+        if (state.recSeconds >= 60) toggleRecord60s();
+      }, 1000);
+    } catch (e) {
+      showToast("Không quay được video: " + e.message);
+    }
+  }
+
   $("btnDownloadPreview").onclick = () => {
     const link = document.createElement("a");
+    if (state.recordedVideoBlob) {
+      const ext = state.recordedVideoBlob.type.includes("mp4") ? "mp4" : "webm";
+      link.download = `locket_video_${Date.now()}.${ext}`;
+      link.href = URL.createObjectURL(state.recordedVideoBlob);
+      link.click();
+      return showToast("Đã tải video vừa quay về máy!");
+    }
     link.download = `locket_studio_${Date.now()}.png`;
     link.href = canvas.toDataURL("image/png");
     link.click();
@@ -974,26 +1083,41 @@
     } catch (e) { showToast("Lỗi AI: " + e.message); }
   };
 
+  async function uploadToLocketStorage(blob, fileName, contentType, isVideo) {
+    const initRes = await fetch(`${WORKER_URL}/storage/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.session.idToken}` },
+      body: JSON.stringify({ userUid: state.session.uid, fileName, contentType, contentLength: blob.size, isVideo }),
+    });
+    const uploadUrl = initRes.headers.get("x-goog-upload-url");
+    if (!uploadUrl) throw new Error("Không lấy được upload URL");
+    const upRes = await fetch(`${WORKER_URL}/storage/upload`, { method: "PUT", headers: { "X-Upload-Url": uploadUrl, "Content-Type": contentType }, body: blob });
+    const upJson = await upRes.json();
+    const bucket = isVideo ? "locket-video" : "locket-img";
+    return `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(upJson.name)}?alt=media&token=${upJson.downloadTokens}`;
+  }
+
   $("btnSendLocket").onclick = async () => {
+    if (state.captureMode === "video60" || state.isRecording) {
+      toggleRecord60s();
+      return;
+    }
     if (state.demoMode || !state.session) return showToast("🎉 Đã mô phỏng gửi Locket! Đăng nhập để gửi thật.");
     showToast("⏳ Đang tải lên Locket...");
     try {
-      const blob = await new Promise((r) => canvas.toBlob(r, "image/webp", 0.92));
-      const fname = `${Date.now()}.webp`;
-      const initRes = await fetch(`${WORKER_URL}/storage/init`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.session.idToken}` },
-        body: JSON.stringify({ bucketType: "image", objectPath: `users/${state.session.uid}/moments/thumbnails/${fname}`, contentType: "image/webp", contentLength: blob.size }),
-      });
-      const uploadUrl = initRes.headers.get("x-goog-upload-url");
-      if (!uploadUrl) throw new Error("Không lấy được upload URL");
-      const upRes = await fetch(`${WORKER_URL}/storage/upload`, { method: "PUT", headers: { "X-Upload-Url": uploadUrl, "Content-Type": "image/webp" }, body: blob });
-      const upJson = await upRes.json();
-      const dlUrl = `https://firebasestorage.googleapis.com/v0/b/locket-img/o/${encodeURIComponent(upJson.name)}?alt=media&token=${upJson.downloadTokens}`;
+      const thumbBlob = await new Promise((r) => canvas.toBlob(r, "image/webp", 0.92));
+      const thumbUrl = await uploadToLocketStorage(thumbBlob, `${Date.now()}.webp`, "image/webp", false);
+      const payload = { thumbnail_url: thumbUrl, recipients: Array.from(state.selectedUids), caption: state.capText.trim() };
+      if (state.recordedVideoBlob) {
+        const ext = state.recordedVideoBlob.type.includes("mp4") ? "mp4" : "webm";
+        const vidUrl = await uploadToLocketStorage(state.recordedVideoBlob, `${Date.now()}.${ext}`, state.recordedVideoBlob.type, true);
+        payload.video_url = vidUrl;
+        state.recordedVideoBlob = null;
+      }
       const momentRes = await fetch(`${WORKER_URL}/rpc/postMomentV2`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${state.session.idToken}` },
-        body: JSON.stringify({ data: { thumbnail_url: dlUrl, recipients: Array.from(state.selectedUids), caption: state.capText.trim() } }),
+        body: JSON.stringify({ data: payload }),
       });
       if (!momentRes.ok) throw new Error("Gửi Moment thất bại");
       showToast("✅ Đã đăng lên Locket thành công!");

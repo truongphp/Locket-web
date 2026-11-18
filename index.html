@@ -54,6 +54,13 @@
       <button id="btnDemoMode" class="w-full py-3 rounded-2xl bg-zinc-800/80 hover:bg-zinc-800 text-zinc-200 font-semibold text-xs border border-zinc-700/60 active:scale-[0.98] transition">
         👀 Xem thử giao diện & đầy đủ tính năng
       </button>
+      <details class="pt-1">
+        <summary class="text-xs font-semibold text-zinc-400 cursor-pointer text-center">🔑 Hoặc đăng nhập bằng Refresh Token</summary>
+        <div class="mt-2.5 space-y-2">
+          <input id="loginRefreshToken" type="password" placeholder="Dán Refresh Token vào đây..." class="w-full px-3.5 py-2.5 rounded-2xl bg-zinc-950 border border-zinc-800 text-xs text-white placeholder-zinc-500" />
+          <button id="btnLoginToken" class="w-full py-2.5 rounded-2xl bg-zinc-800 text-amber-300 font-bold text-xs border border-amber-400/30 active:scale-[0.98] transition">Khôi phục phiên từ Token</button>
+        </div>
+      </details>
     </div>
   </div>
 
@@ -1028,14 +1035,24 @@
 
   $("btnDemoMode").onclick = () => { showToast("Đang chạy chế độ xem thử!"); enterApp(true); };
 
+  const FB_KEY = "AIzaSyCQngaaXQIfJaH0aS217REgIjD7nL431So";
+
   $("btnLogin").onclick = async () => {
     const email = $("loginEmail").value.trim();
     const password = $("loginPass").value;
     if (!email || !password) return showToast("Vui lòng nhập Email & Mật khẩu!");
     $("btnLogin").disabled = true; $("btnLogin").textContent = "⏳ Đang đăng nhập...";
     try {
-      const res = await fetch(`${WORKER_URL}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
-      const data = await res.json();
+      let res = await fetch(`${WORKER_URL}/auth/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+      let data = await res.json();
+      if ((!res.ok || !data.idToken) && String(data.error?.message || data.error || "").includes("API key")) {
+        res = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FB_KEY}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password, returnSecureToken: true })
+        });
+        data = await res.json();
+      }
       if (!res.ok || !data.idToken) throw new Error(data.error?.message || data.error || "Đăng nhập thất bại");
       state.session = { idToken: data.idToken, refreshToken: data.refreshToken, uid: data.localId, email };
       $("userNameBadge").textContent = email.split("@")[0];
@@ -1044,6 +1061,28 @@
       loadFriendsFromWorker();
     } catch (err) { showToast("Lỗi: " + err.message); }
     finally { $("btnLogin").disabled = false; $("btnLogin").textContent = "🚀 Đăng Nhập Locket"; }
+  };
+
+  $("btnLoginToken").onclick = async () => {
+    const rt = $("loginRefreshToken").value.trim();
+    if (!rt) return showToast("Vui lòng dán Refresh Token!");
+    $("btnLoginToken").disabled = true; $("btnLoginToken").textContent = "⏳ Đang khôi phục...";
+    try {
+      let res = await fetch(`${WORKER_URL}/auth/refresh`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ refreshToken: rt }) });
+      let data = await res.json();
+      if (!res.ok || !data.id_token) {
+        const form = new URLSearchParams({ grant_type: "refresh_token", refresh_token: rt });
+        res = await fetch(`https://securetoken.googleapis.com/v1/token?key=${FB_KEY}`, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: form.toString() });
+        data = await res.json();
+      }
+      if (!res.ok || !data.id_token) throw new Error(data.error?.message || data.error || "Token không hợp lệ");
+      state.session = { idToken: data.id_token, refreshToken: data.refresh_token || rt, uid: data.user_id, email: "Locket User" };
+      $("userNameBadge").textContent = "Locket User";
+      $("userAvatarBadge").textContent = "VT";
+      enterApp(false);
+      loadFriendsFromWorker();
+    } catch (err) { showToast("Lỗi Token: " + err.message); }
+    finally { $("btnLoginToken").disabled = false; $("btnLoginToken").textContent = "Khôi phục phiên từ Token"; }
   };
 
   async function loadFriendsFromWorker() {
